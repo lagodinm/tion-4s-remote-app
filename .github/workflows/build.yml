@@ -1,0 +1,66 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Test TionKit (protocol, parsing, schedule)
+        working-directory: Packages/TionKit
+        run: |
+          set -o pipefail
+          if ! swift test 2>&1 | tee "$GITHUB_WORKSPACE/test.log"; then
+            grep -E "error:|failed" "$GITHUB_WORKSPACE/test.log" | sort -u | head -40 | sed "s|$GITHUB_WORKSPACE/||; s/^/::error::/"
+            exit 1
+          fi
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project TionBreezer.xcodeproj \
+            -scheme TionBreezer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|warning:|BUILD" || true
+          if [ ! -d build/Build/Products/Release-iphoneos/TionBreezer.app ]; then
+            grep -E "error:" build.log | sort -u | head -40 | sed "s|$GITHUB_WORKSPACE/||; s/^/::error::/"
+            exit 1
+          fi
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/TionBreezer.app Payload/
+          zip -qry TionBreezer.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TionBreezer-ipa
+          path: TionBreezer.ipa
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build.log
+            test.log
+          if-no-files-found: ignore
