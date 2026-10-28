@@ -32,7 +32,7 @@ struct DeviceView: View {
                 }
 
                 if let active = store.timersState?.active {
-                    Section("Timer slots reported active") {
+                    Section("Timer slots enabled, as the breezer reports") {
                         Text((0..<TimerSlot.count).map { "\($0 + 1): \(active[safe: $0] == true ? "yes" : "no")" }.joined(separator: "   "))
                             .font(.caption.monospaced())
                     }
@@ -73,7 +73,7 @@ private struct RawStateTable: View {
 
     private static let meanings: [Int: String] = [
         0: "Flags: power, sound, light, heater, mode, filter",
-        1: "Flags: heater rating, MagicAir, timer",
+        1: "Flags: heater rating, MagicAir, timers enabled, counter",
         2: "Air intake",
         3: "Target °C",
         4: "Fan speed",

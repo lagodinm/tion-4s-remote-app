@@ -8,7 +8,7 @@ Not affiliated with or endorsed by Tion. Use at your own risk.
 
 **What it adds over the Android app**
 
-- **Schedules with any number of on/off events, up to 12.** For example: on 04:00, off 07:00,
+- **Schedules with several on/off events, up to 6.** For example: on 04:00, off 07:00,
   on 22:00, off 02:00, each with its own days. They're stored in the breezer, so it follows them
   with the phone off or away.
 - **Every reading the breezer reports**, including values the Android app receives but doesn't show:
@@ -74,6 +74,23 @@ The 4S has 12 timer slots. Each slot holds:
 - an action: turn on with a fan speed, intake, heater and target temperature, or turn off
 - an enabled flag
 
+The breezer runs the schedule by itself, but its firmware has some limits, and the app works
+within them:
+
+- **Up to 6 events.** The slots work in pairs. When the first slot of a pair fires, the breezer
+  overwrites the second with the settings from just before it fired. The second slot then runs
+  only if nothing has changed since. So the app gives every event the first slot of a pair and
+  leaves the second empty. A schedule saved by an earlier version of this app is rewritten the
+  next time you save.
+- **No timers on Sundays.** The breezer's clock reports Sunday as a day its firmware can't
+  handle, so nothing runs on Sundays. Worse, an event due on a Sunday stops the whole schedule
+  until the clock is next set. The app therefore doesn't offer Sunday. On Sundays the breezer
+  stays as Saturday's last event left it.
+- **One event per minute.** If two events fall in the same minute, only one runs, so the app asks
+  you to change one.
+- **Events fire at the start of their minute.** One saved for the current minute waits until its
+  next day.
+
 When you tap **Save to breezer**, the app follows the same sequence as the Tion app:
 
 1. Set the breezer's clock.
@@ -83,9 +100,11 @@ When you tap **Save to breezer**, the app follows the same sequence as the Tion 
 5. Read every slot back to confirm it was stored.
 
 Periods that cross midnight (22:00 → 02:00) put the turn-off on the following day automatically.
+Saturday's period can't end on Sunday, so it lasts until the next turn-off.
 
-The breezer's clock runs on local time. The app corrects it on every connection when it's more than
-30 s off, so after a daylight-saving change, open the app once.
+The breezer's clock runs on local time. The app sets it every time it connects, which also restarts
+a stalled schedule. It skips this on Sundays: a clock set on a Sunday makes the breezer skip
+Monday's events. Saving on a Sunday still sets it, so open the app once on the Monday after.
 
 Timers need firmware 0050 or newer, the same limit the Tion app applies.
 

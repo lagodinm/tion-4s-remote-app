@@ -60,6 +60,8 @@ public struct BreezerState: Equatable {
     public var heaterRatingCode: Int { Int(raw[0] >> 7) | Int(raw[1] & 0x03) << 1 }
     public var magicAirConnected: Bool { bit(1, 2) }
     public var magicAirAuto: Bool { bit(1, 3) }
+    /// At least one timer slot is enabled. Bits 5-7 of the same byte are a counter that changes with
+    /// every state request.
     public var timerActive: Bool { bit(1, 4) }
 
     public var recirculation: Bool { raw[2] != 0 }
@@ -268,7 +270,7 @@ public struct TurboInfo: Equatable {
     }
 }
 
-/// Per-slot "active" flags (`0x3531`), one byte per timer slot.
+/// Per-slot flags (`0x3531`), one byte per timer slot: the slot's enabled bit.
 public struct TimersState: Equatable {
     public let active: [Bool]
 

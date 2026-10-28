@@ -19,6 +19,7 @@ public struct DayMask: OptionSet, Hashable, Codable {
     public static let weekdays: DayMask = [.monday, .tuesday, .wednesday, .thursday, .friday]
     public static let weekend: DayMask = [.saturday, .sunday]
     public static let everyDay = DayMask(rawValue: 0x7F)
+    public static let mondayToSaturday: DayMask = [.weekdays, .saturday]
 
     public static let shortNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     public static let letters = ["M", "T", "W", "T", "F", "S", "S"]
@@ -46,6 +47,7 @@ public struct DayMask: OptionSet, Hashable, Codable {
         if isEmpty { return "No days" }
         switch self {
         case .everyDay: return "Every day"
+        case .mondayToSaturday: return "Mon–Sat"
         case .weekdays: return "Weekdays"
         case .weekend: return "Weekends"
         default: return (0..<7).filter { includes(day: $0) }.map { Self.shortNames[$0] }.joined(separator: ", ")
@@ -171,11 +173,14 @@ public struct TimerSlot: Equatable, Hashable, Codable, Identifiable {
         return slot
     }
 
-    /// Compares only what changes the breezer's behaviour, ignoring settings that don't apply
-    /// (for example fan speed of a turn-off event).
+    /// Compares only what changes the breezer's behaviour, ignoring settings that don't apply:
+    /// anything in a slot that never fires, and everything but power in a turn-off event (the
+    /// firmware overwrites those with the current settings when it fires).
     public func behavesLike(_ other: TimerSlot) -> Bool {
         guard id == other.id, enabled == other.enabled, days == other.days,
-              hour == other.hour, minute == other.minute, powerOn == other.powerOn else { return false }
+              hour == other.hour, minute == other.minute else { return false }
+        guard isActive else { return true }
+        guard powerOn == other.powerOn else { return false }
         guard powerOn else { return true }
         return fanSpeed == other.fanSpeed && heaterOn == other.heaterOn
             && targetTemperature == other.targetTemperature && recirculation == other.recirculation
@@ -208,10 +213,12 @@ public enum WeekSchedule {
         }
     }
 
+    /// The moments the breezer actually acts on. Sunday occurrences are left out: the firmware
+    /// never runs them (see `ScheduleRules.runnableDays`).
     public static func events(from slots: [TimerSlot]) -> [Event] {
         var events: [Event] = []
         for slot in slots where slot.isActive {
-            for day in 0..<7 where slot.days.includes(day: day) {
+            for day in 0..<7 where slot.days.intersection(ScheduleRules.runnableDays).includes(day: day) {
                 events.append(Event(slotId: slot.id, minuteOfWeek: day * minutesPerDay + slot.minuteOfDay, powerOn: slot.powerOn))
             }
         }
@@ -270,13 +277,14 @@ public enum WeekSchedule {
         return dayIndex * minutesPerDay + (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
     }
 
-    /// Minutes of the week where two events fire at once with different actions.
+    /// Minutes of the week where more than one event is due. The firmware runs only the one in the
+    /// lowest slot and skips the others.
     public static func conflicts(in slots: [TimerSlot]) -> [Int] {
-        var actions: [Int: Set<Bool>] = [:]
+        var counts: [Int: Int] = [:]
         for event in events(from: slots) {
-            actions[event.minuteOfWeek, default: []].insert(event.powerOn)
+            counts[event.minuteOfWeek, default: 0] += 1
         }
-        return actions.filter { $0.value.count > 1 }.keys.sorted()
+        return counts.filter { $0.value > 1 }.keys.sorted()
     }
 
     /// "Tue 07:00" for a minute of the week.
@@ -284,5 +292,56 @@ public enum WeekSchedule {
         let day = (minute / minutesPerDay) % 7
         let inDay = minute % minutesPerDay
         return DayMask.shortNames[day] + " " + String(format: "%02d:%02d", inDay / 60, inDay % 60)
+    }
+}
+
+/// How the Breezer 4S firmware actually runs its timer slots, and the layout the app writes so
+/// that every event runs.
+///
+/// - Slots work in pairs (0, 1), (2, 3) … When an even slot fires, the firmware overwrites the odd
+///   slot after it with the settings from just before, and an odd slot only fires if nothing has
+///   changed since its even partner ran. So each event gets an even slot of its own and odd slots
+///   stay empty: at most 6 events.
+/// - The breezer's clock chip numbers weekdays 0–6, but the firmware stores Sunday as 7 and can't
+///   handle 0. Nothing runs on Sundays, and an event due on a Sunday stalls the whole schedule
+///   until the clock is next set. So events never include Sunday.
+/// - When several events are due in the same minute, only the one in the lowest slot runs.
+/// - An event fires once, at the start of its minute. A missed minute isn't caught up.
+public enum ScheduleRules {
+    public static let eventSlotIds = Array(stride(from: 0, to: TimerSlot.count, by: 2))
+    public static var maxEvents: Int { eventSlotIds.count }
+    public static let runnableDays = DayMask.mondayToSaturday
+
+    public static func eventCount(in slots: [TimerSlot]) -> Int {
+        slots.filter(\.isInUse).count
+    }
+
+    /// Events that are only set for Sunday, so would never run.
+    public static func sundayOnlyEvents(in slots: [TimerSlot]) -> [TimerSlot] {
+        slots.filter { $0.isInUse && !$0.days.isEmpty && $0.days.isDisjoint(with: runnableDays) }
+    }
+
+    /// The 12 slots to write for `slots`: every event in an even slot (events already in one keep
+    /// it), without Sunday, and every odd slot empty. `nil` if there are more than `maxEvents` events.
+    public static func layout(_ slots: [TimerSlot]) -> [TimerSlot]? {
+        let events = slots.filter(\.isInUse).sorted { $0.id < $1.id }
+        guard events.count <= maxEvents else { return nil }
+        var freeIds = eventSlotIds.filter { id in !events.contains { $0.id == id } }
+        var result = (0..<TimerSlot.count).map { TimerSlot.empty(id: $0) }
+        for var event in events {
+            if !eventSlotIds.contains(event.id) {
+                event.id = freeIds.removeFirst()
+            }
+            event.days.remove(.sunday)
+            result[event.id] = event
+        }
+        return result
+    }
+
+    /// The breezer has to be told the time on a weekday other than Sunday: set on a Sunday, its
+    /// clock chip goes on to report Monday as the invalid day 0, so Monday's events are skipped
+    /// and later days run a day late until the clock is set again.
+    public static func isSafeDayToSetClock(_ date: Date, calendar: Calendar = .current) -> Bool {
+        calendar.component(.weekday, from: date) != 1
     }
 }

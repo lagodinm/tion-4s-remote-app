@@ -259,7 +259,7 @@ private struct DetailsCard: View {
                 LabeledContent("Power board", value: Format.temperature(state.powerBoardTemperature))
                 LabeledContent("Heater element", value: state.heaterRunning ? "Heating" : "Idle")
                 LabeledContent("Turbo", value: turboText)
-                LabeledContent("Schedule", value: state.timerActive ? "A timer is active" : "No active timer")
+                LabeledContent("Schedule", value: state.timerActive ? "Timers enabled" : "No timers enabled")
                 LabeledContent("MagicAir", value: state.magicAirConnected ? (state.magicAirAuto ? "Connected · auto" : "Connected") : "Not connected")
                 LabeledContent("Sound / light", value: "\(state.soundOn ? "On" : "Off") / \(state.lightOn ? "On" : "Off")")
             }

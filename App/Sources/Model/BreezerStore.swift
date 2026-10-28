@@ -97,7 +97,7 @@ final class BreezerStore: ObservableObject {
         Task {
             await refreshState()
             await loadDeviceInfo()
-            await checkClock(syncIfOff: true)
+            await checkClock(sync: true)
             await refreshTurbo()
             if deviceInfo?.supportsTimers ?? true {
                 await loadSchedule()
@@ -252,19 +252,34 @@ final class BreezerStore: ObservableObject {
         }
     }
 
-    func checkClock(syncIfOff: Bool) async {
+    /// Reads the breezer's clock. With `sync` it also sets it, even when it's right: setting the
+    /// clock makes the breezer plan its next timer again, which restarts a schedule the firmware
+    /// has stalled (see `ScheduleRules`). Never on a Sunday.
+    func checkClock(sync: Bool) async {
         guard let reply = try? await link.send(.requestTime()),
               let value = try? DeviceClock.value(from: reply) else { return }
         let now = Date()
         let offset = DeviceClock.date(fromDeviceValue: value, timeZone: .current, now: now).timeIntervalSince(now)
         clockOffset = offset
-        if syncIfOff, abs(offset) > 30 {
-            link.addLog(.info, "Breezer clock is off by \(Int(offset)) s; setting it")
-            await syncClock()
+        guard sync else { return }
+        if ScheduleRules.isSafeDayToSetClock(now) {
+            link.addLog(.info, "Setting the breezer clock (it was off by \(Int(offset)) s)")
+            await setClock()
+        } else {
+            link.addLog(.info, "Not setting the breezer clock on a Sunday (it's off by \(Int(offset)) s)")
         }
     }
 
+    /// The Sync button.
     func syncClock() async {
+        guard ScheduleRules.isSafeDayToSetClock(Date()) else {
+            message = "The breezer can't take the time on a Sunday: its firmware would then skip Monday's events. The app sets the clock automatically when it connects on any other day."
+            return
+        }
+        await setClock()
+    }
+
+    private func setClock() async {
         do {
             try await link.send(.setTime(DeviceClock.deviceValue(for: Date(), timeZone: .current)))
         } catch {
@@ -272,17 +287,49 @@ final class BreezerStore: ObservableObject {
             return
         }
         try? await Task.sleep(for: .milliseconds(400))
-        await checkClock(syncIfOff: false)
+        await checkClock(sync: false)
     }
 
     // MARK: Schedule
 
+    /// True when saving would change what the breezer does: the user edited events, or the slots
+    /// on the breezer aren't laid out the way its firmware needs (see `ScheduleRules`).
     var hasUnsavedScheduleChanges: Bool {
         guard let deviceSlots else { return false }
-        return draftSlots != deviceSlots
+        guard let planned = ScheduleRules.layout(draftSlots) else { return true }
+        return zip(planned, deviceSlots).contains { !$0.behavesLike($1) }
     }
 
-    var freeSlotCount: Int { draftSlots.filter { !$0.isInUse }.count }
+    /// The breezer holds a schedule its firmware can't run as shown, so it needs saving again.
+    var breezerScheduleNeedsRewrite: Bool {
+        guard let deviceSlots else { return false }
+        guard let planned = ScheduleRules.layout(deviceSlots) else { return true }
+        return zip(planned, deviceSlots).contains { !$0.behavesLike($1) }
+    }
+
+    var eventCount: Int { ScheduleRules.eventCount(in: draftSlots) }
+
+    var freeEventCount: Int { Swift.max(0, ScheduleRules.maxEvents - eventCount) }
+
+    /// Why the draft can't be saved yet, as sentences for the user. Empty when it can.
+    var scheduleProblems: [String] {
+        var problems: [String] = []
+        if eventCount > ScheduleRules.maxEvents {
+            let extra = eventCount - ScheduleRules.maxEvents
+            problems.append("The breezer can run \(ScheduleRules.maxEvents) events. Delete \(extra) to save.")
+        }
+        let clashes = WeekSchedule.conflicts(in: draftSlots)
+        if !clashes.isEmpty {
+            problems.append("More than one event at " + clashes.map(WeekSchedule.label(forMinuteOfWeek:)).joined(separator: ", ")
+                            + ". The breezer would run only one of them, so change a time.")
+        }
+        let sundayOnly = ScheduleRules.sundayOnlyEvents(in: draftSlots)
+        if !sundayOnly.isEmpty {
+            problems.append("Events set only for Sunday never run (" + sundayOnly.map(\.timeText).joined(separator: ", ")
+                            + "). Pick other days or delete them.")
+        }
+        return problems
+    }
 
     var timersSupported: Bool { deviceInfo?.supportsTimers ?? true }
 
@@ -306,7 +353,8 @@ final class BreezerStore: ObservableObject {
             }
             slots.append(slot)
         }
-        let keepDraft = hasUnsavedScheduleChanges && !discardChanges
+        let userEdited = deviceSlots.map { $0 != draftSlots } ?? false
+        let keepDraft = userEdited && !discardChanges
         deviceSlots = slots
         if !keepDraft {
             draftSlots = slots
@@ -346,13 +394,16 @@ final class BreezerStore: ObservableObject {
         }
     }
 
-    /// A new event in the first free slot, pre-filled with the breezer's current settings.
+    /// A new event in the first free even slot, pre-filled with the breezer's current settings.
     func newEvent(powerOn: Bool, hour: Int = 8, minute: Int = 0, excluding taken: Set<Int> = []) -> TimerSlot? {
-        guard let free = draftSlots.first(where: { !$0.isInUse && !taken.contains($0.id) }) else { return nil }
+        guard eventCount + taken.count < ScheduleRules.maxEvents,
+              let free = draftSlots.first(where: {
+                  ScheduleRules.eventSlotIds.contains($0.id) && !$0.isInUse && !taken.contains($0.id)
+              }) else { return nil }
         let current = settings
         return TimerSlot(
             id: free.id,
-            days: .everyDay,
+            days: ScheduleRules.runnableDays,
             hour: hour,
             minute: minute,
             enabled: true,
@@ -367,12 +418,13 @@ final class BreezerStore: ObservableObject {
     }
 
     /// Adds a turn-on event and a turn-off event. If the period crosses midnight the turn-off
-    /// event fires on the following days.
+    /// event fires on the following days, except Sunday, when timers don't run.
     func addPeriod(start: TimerSlot, endHour: Int, endMinute: Int) -> Bool {
         guard let endTemplate = newEvent(powerOn: false, hour: endHour, minute: endMinute, excluding: [start.id]) else { return false }
         var end = endTemplate
         let crossesMidnight = endHour * 60 + endMinute <= start.minuteOfDay
-        end.days = crossesMidnight ? start.days.shifted(by: 1) : start.days
+        end.days = (crossesMidnight ? start.days.shifted(by: 1) : start.days).intersection(ScheduleRules.runnableDays)
+        guard !end.days.isEmpty else { return false }
         end.soundOn = start.soundOn
         end.lightOn = start.lightOn
         upsert(start)
@@ -380,12 +432,22 @@ final class BreezerStore: ObservableObject {
         return true
     }
 
-    /// Writes changed slots, mirroring the Tion app: sync the clock, mute the beeper, write each slot
-    /// with a pause, restore the previous settings, then read the slots back to confirm.
+    /// Writes the slots that need to change, in the layout `ScheduleRules` describes, mirroring the
+    /// Tion app: set the clock, mute the beeper, write each slot with a pause, restore the previous
+    /// settings, then read the slots back to confirm.
     func saveSchedule() async {
         guard let original = deviceSlots, link.status.isReady, scheduleActivity == nil else { return }
-        let changed = draftSlots.filter { draft in original.first(where: { $0.id == draft.id }) != draft }
+        if let problem = scheduleProblems.first {
+            scheduleMessage = problem
+            return
+        }
+        guard let planned = ScheduleRules.layout(draftSlots) else { return }
+        // Clear odd slots first, so events moving out of them stop before their new slots start.
+        let changed = planned
+            .filter { slot in !(original.first { $0.id == slot.id }?.behavesLike(slot) ?? false) }
+            .sorted { ($0.id % 2 == 1 ? 0 : 1, $0.id) < ($1.id % 2 == 1 ? 0 : 1, $1.id) }
         guard !changed.isEmpty else { return }
+        let savedOnSunday = !ScheduleRules.isSafeDayToSetClock(Date())
 
         pausePolling += 1
         defer {
@@ -399,6 +461,8 @@ final class BreezerStore: ObservableObject {
             await sendSettings()
         }
 
+        // Set the clock even on a Sunday: without it the breezer would plan its next timer from a
+        // Sunday clock it can't read, and stop running timers altogether until the clock is set.
         scheduleActivity = "Setting the breezer's clock…"
         try? await link.send(.setTime(DeviceClock.deviceValue(for: Date(), timeZone: .current)))
         try? await Task.sleep(for: .milliseconds(400))
@@ -412,7 +476,7 @@ final class BreezerStore: ObservableObject {
 
         var failed: [Int] = []
         for (index, slot) in changed.enumerated() {
-            scheduleActivity = "Writing event \(index + 1) of \(changed.count)…"
+            scheduleActivity = "Writing slot \(index + 1) of \(changed.count)…"
             do {
                 try await link.send(.setTimer(slot))
             } catch {
@@ -443,15 +507,17 @@ final class BreezerStore: ObservableObject {
         let problems = Set(failed + mismatched)
         if problems.isEmpty {
             draftSlots = stored
-            scheduleMessage = "Saved to the breezer. It will follow this schedule even when your phone is away."
+            scheduleMessage = savedOnSunday
+                ? "Saved. Because it's Sunday, the breezer will skip Monday's events unless you open this app on Monday: its firmware mishandles a clock set on a Sunday."
+                : "Saved to the breezer. It will follow this schedule even when your phone is away."
         } else {
             // Keep the user's version of the slots that didn't stick so they can try again.
             draftSlots = stored.map { slot in
                 problems.contains(slot.id) ? (changed.first { $0.id == slot.id } ?? slot) : slot
             }
-            scheduleMessage = "\(problems.count) event(s) didn't save. Tap Save to try again."
+            scheduleMessage = "\(problems.count) slot(s) didn't save. Tap Save to try again."
         }
         await refreshTimersState()
-        await checkClock(syncIfOff: false)
+        await checkClock(sync: false)
     }
 }

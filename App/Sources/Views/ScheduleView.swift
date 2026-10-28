@@ -21,7 +21,7 @@ struct ScheduleView: View {
                         .listRowBackground(Color.clear)
                 }
                 Section {
-                    Text("Events are stored in the breezer itself (up to \(TimerSlot.count)), so it follows the schedule even when your phone is off or away.")
+                    Text("Events are stored in the breezer itself, up to \(ScheduleRules.maxEvents), so it follows the schedule even when your phone is off or away. Timers never run on Sundays: that's a limit of the Breezer 4S firmware.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     clockRow
@@ -46,12 +46,19 @@ struct ScheduleView: View {
                             .padding(.vertical, 4)
                     }
 
-                    let conflicts = WeekSchedule.conflicts(in: store.draftSlots)
-                    if !conflicts.isEmpty {
+                    let problems = store.scheduleProblems
+                    if !problems.isEmpty {
                         Section {
-                            Label("Turn-on and turn-off at the same time: " + conflicts.map(WeekSchedule.label(forMinuteOfWeek:)).joined(separator: ", "),
-                                  systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
+                            ForEach(problems, id: \.self) { problem in
+                                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                                    .font(.footnote)
+                            }
+                        }
+                    } else if store.breezerScheduleNeedsRewrite {
+                        Section {
+                            Label("The schedule stored in the breezer is laid out in a way its firmware can't run reliably. Tap Save to rewrite it.",
+                                  systemImage: "arrow.triangle.2.circlepath")
                                 .font(.footnote)
                         }
                     }
@@ -73,7 +80,7 @@ struct ScheduleView: View {
                             }
                         }
                     } header: {
-                        Text("Events · \(events.count) of \(TimerSlot.count) slots used")
+                        Text("Events · \(events.count) of \(ScheduleRules.maxEvents)")
                     } footer: {
                         Text("Tap an event to edit it, swipe left to delete. Changes are sent when you tap Save.")
                     }
@@ -140,10 +147,10 @@ struct ScheduleView: View {
             } message: {
                 Text(store.scheduleMessage ?? "")
             }
-            .alert("All \(TimerSlot.count) slots are in use", isPresented: $noFreeSlots) {
+            .alert("No room for more events", isPresented: $noFreeSlots) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text("Delete an event to free a slot.")
+                Text("The breezer can run \(ScheduleRules.maxEvents) events, and a period needs two. Delete an event to make room.")
             }
         }
     }
@@ -176,7 +183,7 @@ struct ScheduleView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!link.status.isReady || store.scheduleActivity != nil)
+            .disabled(!link.status.isReady || store.scheduleActivity != nil || !store.scheduleProblems.isEmpty)
         }
         .padding()
         .background(.bar)
@@ -191,7 +198,7 @@ struct ScheduleView: View {
     }
 
     private func addPeriod() {
-        guard store.freeSlotCount >= 2, let start = store.newEvent(powerOn: true, hour: 22) else {
+        guard store.freeEventCount >= 2, let start = store.newEvent(powerOn: true, hour: 22) else {
             noFreeSlots = true
             return
         }
@@ -213,7 +220,7 @@ private struct EventRow: View {
                     Text(slot.timeText).font(.title3.weight(.semibold).monospacedDigit())
                     Text(slot.powerOn ? "Turn on" : "Turn off").font(.subheadline)
                 }
-                Text(slot.days.summary).font(.caption).foregroundStyle(.secondary)
+                Text(slot.days.intersection(ScheduleRules.runnableDays).summary).font(.caption).foregroundStyle(.secondary)
                 if slot.powerOn {
                     Text(settingsSummary).font(.caption).foregroundStyle(.secondary)
                 }
@@ -279,6 +286,9 @@ struct WeekTimelineView: View {
                     .padding(.leading, 8)
                 Text("Off").font(.caption2).foregroundStyle(.secondary)
             }
+            Text("Sun: timers don't run, so the breezer stays as Saturday's last event left it.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 

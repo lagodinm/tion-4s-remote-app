@@ -38,8 +38,6 @@ struct EventEditorView: View {
                     Toggle("Enabled", isOn: $slot.enabled)
                     Toggle("Beep", isOn: $slot.soundOn)
                     Toggle("Indicator light", isOn: $slot.lightOn)
-                } footer: {
-                    Text("Slot \(slot.id + 1) of \(TimerSlot.count) in the breezer.")
                 }
             }
             .navigationTitle(slot.powerOn ? "Turn on" : "Turn off")
@@ -53,7 +51,7 @@ struct EventEditorView: View {
                         onSave(slot)
                         dismiss()
                     }
-                    .disabled(slot.days.isEmpty)
+                    .disabled(slot.days.isDisjoint(with: ScheduleRules.runnableDays))
                 }
             }
         }
@@ -81,6 +79,11 @@ struct PeriodEditorView: View {
         endHour * 60 + endMinute <= start.minuteOfDay
     }
 
+    /// Days the turn-off event runs on; a turn-off due on Sunday can't run.
+    private var endDays: DayMask {
+        (crossesMidnight ? start.days.shifted(by: 1) : start.days).intersection(ScheduleRules.runnableDays)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -92,7 +95,9 @@ struct PeriodEditorView: View {
                 } header: {
                     Text("Turn off at")
                 } footer: {
-                    if crossesMidnight {
+                    if crossesMidnight && start.days.contains(.saturday) {
+                        Text("Ends the next morning: the turn-off event runs on the day after each selected day. Saturday's period can't end on Sunday, when timers don't run, so it lasts until the next turn-off.")
+                    } else if crossesMidnight {
                         Text("Ends the next morning: the turn-off event runs on the day after each selected day.")
                     }
                 }
@@ -112,7 +117,8 @@ struct PeriodEditorView: View {
                         onSave(start, endHour, endMinute)
                         dismiss()
                     }
-                    .disabled(start.days.isEmpty || (endHour == start.hour && endMinute == start.minute))
+                    .disabled(start.days.isDisjoint(with: ScheduleRules.runnableDays) || endDays.isEmpty
+                              || (endHour == start.hour && endMinute == start.minute))
                 }
             }
         }
@@ -170,6 +176,7 @@ struct TimeWheel: View {
     }
 }
 
+/// Monday to Saturday. Sunday is shown but can't be picked: the 4S never runs timers on Sundays.
 struct DayPicker: View {
     @Binding var days: DayMask
 
@@ -177,8 +184,10 @@ struct DayPicker: View {
         VStack(spacing: 12) {
             HStack(spacing: 6) {
                 ForEach(0..<7, id: \.self) { index in
-                    let selected = days.includes(day: index)
+                    let runnable = ScheduleRules.runnableDays.includes(day: index)
+                    let selected = runnable && days.includes(day: index)
                     Button {
+                        days.formIntersection(ScheduleRules.runnableDays)
                         if selected {
                             days.remove(.day(index))
                         } else {
@@ -190,18 +199,24 @@ struct DayPicker: View {
                             .frame(width: 36, height: 36)
                             .background(selected ? Color.accentColor : Color.secondary.opacity(0.15), in: Circle())
                             .foregroundStyle(selected ? Color.white : Color.primary)
+                            .opacity(runnable ? 1 : 0.35)
                     }
                     .buttonStyle(.plain)
+                    .disabled(!runnable)
                     .accessibilityLabel(DayMask.shortNames[index])
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
             .frame(maxWidth: .infinity)
             HStack {
-                presetButton("Every day", .everyDay)
+                presetButton("Mon–Sat", .mondayToSaturday)
                 presetButton("Weekdays", .weekdays)
-                presetButton("Weekends", .weekend)
+                presetButton("Saturday", .saturday)
             }
+            Text("Sunday isn't available: the Breezer 4S firmware doesn't run timers on Sundays.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 4)
     }
